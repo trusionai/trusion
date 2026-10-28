@@ -1,0 +1,12 @@
+# TRUSION AI robots.txt
+# Allow all crawlers for the public landing page
+User-agent: *
+Allow: /
+
+# Disallow app-only routes from indexing
+Disallow: /app/
+Disallow: /dashboard/
+Disallow: /api/
+
+# Sitemap (uncomment when production domain is known)
+# Sitemap: https://trusion.ai/sitemap.xml

@@ -1,0 +1,18 @@
+# Cloudflare Pages _headers file
+# Security headers for all routes
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(self), geolocation=(), microphone=(), payment=(), usb=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; font-src https://fonts.gstatic.com https://cdnjs.cloudflare.com data:; connect-src 'self' https://trusion-api.up.railway.app; img-src 'self' data: blob: https:; frame-ancestors 'none';
+
+# Cache static assets aggressively
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# No-cache for HTML (always get latest)
+/*.html
+  Cache-Control: public, max-age=0, must-revalidate

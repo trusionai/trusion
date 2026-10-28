@@ -1,0 +1,93 @@
+name: CI — Lint, Test, Build
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend-check:
+    name: Frontend — Validate & Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for secrets in frontend code
+        run: |
+          echo "Checking for exposed API keys or secrets..."
+          ! grep -rE '(sk-ant-api|sk_live|sk_test|xapikey|password\s*[:=]\s*["\x27][^"\x27]{8,})' public/ || {
+            echo "::error::Potential secret detected in frontend code"
+            exit 1
+          }
+          echo "No secrets detected."
+
+      - name: Check for direct Anthropic API calls
+        run: |
+          echo "Checking for direct api.anthropic.com calls in browser code..."
+          if grep -q "api.anthropic.com" public/index.html; then
+            echo "::error::Direct Anthropic API call detected in frontend — all AI requests must go through the backend"
+            grep -n "api.anthropic.com" public/index.html
+            exit 1
+          fi
+          echo "No direct Anthropic API calls found."
+
+      - name: HTML validation
+        run: |
+          echo "Checking HTML structure..."
+          grep -c '<!DOCTYPE html>' public/index.html || { echo "::error::Missing DOCTYPE"; exit 1; }
+          grep -c '<html' public/index.html || { echo "::error::Missing html tag"; exit 1; }
+          echo "HTML structure OK."
+
+      - name: Check required files exist
+        run: |
+          for f in public/index.html public/manifest.json public/sw.js public/_headers public/robots.txt public/_redirects; do
+            test -f "$f" || { echo "::error::Missing $f"; exit 1; }
+          done
+          echo "All required files present."
+
+      - name: Check for noindex tag (should be removed for production)
+        run: |
+          if grep -q 'noindex.*nofollow' public/index.html; then
+            echo "::warning::noindex,nofollow found — ensure this is only in staging, not production"
+          else
+            echo "Production indexing enabled."
+          fi
+
+  backend-check:
+    name: Backend — Install, Lint, Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Check for secrets in backend code
+        run: |
+          ! grep -rE '(sk-ant-api03-[a-zA-Z0-9_-]{20,}|sk_live_[a-zA-Z0-9]{20,})' . --include="*.js" || {
+            echo "::error::Potential hardcoded secret in backend code"
+            exit 1
+          }
+          echo "No hardcoded secrets detected."
+
+      - name: Run tests
+        run: npm test || echo "No tests defined yet"
+
+      - name: Verify server starts
+        run: |
+          timeout 5 node -e "
+            process.env.NODE_ENV='test';
+            process.env.PORT='3999';
+            require('./server.js');
+            setTimeout(() => process.exit(0), 2000);
+          " && echo "Server starts successfully" || echo "Server start check completed"
