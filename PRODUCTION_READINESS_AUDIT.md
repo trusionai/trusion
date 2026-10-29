@@ -1,19 +1,36 @@
 # TRUSION AI — Production Readiness Audit
 
-**Audit Date:** 2026-10-28  
-**Artifact:** `public/index.html` (originally `index-7.html`, 6,672 lines)  
-**Stack Detected:** Single-file HTML/CSS/JS application (no build step, no framework, no package.json)  
+**Audit Date:** 2026-10-28 (initial) · 2026-10-29 (hardening pass 2)
+**Artifact:** `public/index.html` (originally `index-7.html`, 6,672 lines → 402,898 bytes after remediation)
+**Stack Detected:** Single-file HTML/CSS/JS application (no build step, no framework) + Express.js backend
 **Target Deployment:** Cloudflare Pages (frontend) + Railway (backend API) + Supabase (auth/DB) + Anthropic API (AI)
 
 ---
 
 ## Executive Summary
 
-The TRUSION AI application is a **single-file HTML application** with ~6,672 lines of inline CSS and JavaScript. It implements a comprehensive scam-detection platform with 30+ views, an AI scam analyzer, QR scanner, APK scanner, threat intelligence feed, community reporting, billing/subscription system, and PWA support.
+### Original state (2026-10-28)
 
-The application is **architecturally a prototype/demo** — all AI calls go directly from the browser to the Anthropic API using a user-supplied BYOK key, billing is client-side staged (no real payment gateway), authentication is unconfigured (Supabase placeholders), and all "threat intelligence" data is hardcoded mock data presented as live statistics.
+The application was **architecturally a prototype/demo** — AI calls went directly from the browser to the Anthropic API using a user-supplied BYOK key, billing was client-side staged with no real gateway, authentication was unconfigured behind Supabase placeholders, and all "threat intelligence" data was hardcoded mock data presented as live statistics. **17 findings** were identified across security, data integrity, and deployment readiness.
 
-**17 findings** were identified across security, data integrity, and deployment readiness categories.
+### After hardening pass 1 (2026-10-28)
+
+A backend was introduced, AI traffic moved server-side, plan manipulation was blocked, and deployment configuration was added. The remaining problem was that the *demo scaffolding itself* — guest login, seeded datasets, a frontend API-key panel — was still shipped.
+
+### After hardening pass 2 (2026-10-29) — current state
+
+The demo layer is **gone at the functional level, not merely hidden**:
+
+- **Guest/demo mode deleted.** No "Continue as Guest" button, no `continueAsGuest()`, no dev fallback that grants a session when Supabase is unavailable. A misconfigured deploy now locks out and prints an admin message rather than silently admitting anonymous users.
+- **All fabricated datasets deleted.** Testimonials, active threats, scam alerts, threat cities, community reports, scam DB, threat intel, top reporters, family members, and every chart series are now empty arrays. Each surface renders an honest empty state ("Belum dinilai", "Belum ada data", "belum aktif").
+- **Fabricated logic removed.** The APK scanner is reclassified as an explicit filename/size heuristic with a visible disclaimer. The screenshot analyzer calls real AI vision instead of a filename hash. The breach checker reports "not configured" instead of inventing matches.
+- **Frontend API-key management deleted.** No key input, eye toggle, copy button, Regenerate action, Rate Limit slider, or Reset DIL State button. `toggleApiKey()` and the whole API Settings card are gone.
+- **No credential or entitlement state in browser storage.** `saveDILState`/`loadDILState` are intentional no-ops; caches and queues are in-memory only.
+- **Runtime config moved to `public/config.js`** with fail-closed validation — empty, malformed, or `YOUR_` values disable auth rather than bypass it.
+
+Verification this pass: 0 runtime JS errors, 0 unhandled rejections in headless Chrome; 5/5 backend endpoints behaving correctly; 3/3 CI gates passing; no secret patterns in `public/`. Details in `docs/TEST_REPORT.md`.
+
+**17 findings total: 14 remediated, 3 documented with mitigations.**
 
 ---
 
@@ -34,10 +51,28 @@ The application is **architecturally a prototype/demo** — all AI calls go dire
 | P2-011 | P2 | Deployment | No backend service exists — all logic is client-side | **REMEDIATED** |
 | P2-012 | P2 | Deployment | No `.gitignore`, `.env.example`, CI/CD, or deployment configuration | **REMEDIATED** |
 | P2-013 | P2 | Deployment | No health endpoint, no CORS configuration, no structured logging | **REMEDIATED** |
-| P2-014 | P2 | Deployment | PWA manifest.json and sw.js referenced but not provided | **DOCUMENTED** |
-| P2-015 | P2 | Security | Service worker registration with no cache strategy defined | **DOCUMENTED** |
-| P2-016 | P2 | Data | localStorage used for sensitive state (scan history, plan, API key) | **DOCUMENTED** |
-| P3-017 | P3 | UX | Hardcoded user profile "Rian Aditya" in sidebar and settings | **DOCUMENTED** |
+| P2-014 | P2 | Deployment | PWA manifest.json and sw.js referenced but not provided | **REMEDIATED** |
+| P2-015 | P2 | Security | Service worker registration with no cache strategy defined | **REMEDIATED** |
+| P2-016 | P2 | Data | localStorage used for sensitive state (scan history, plan, API key) | **REMEDIATED** |
+| P3-017 | P3 | UX | Hardcoded user profile "Rian Aditya" in sidebar and settings | **REMEDIATED** |
+
+### Pass-2 findings (2026-10-29)
+
+| ID | Severity | Category | Title | Status |
+|----|----------|----------|-------|--------|
+| P0-018 | P0 | Security | Guest/demo login bypass grants an unauthenticated session | **REMEDIATED** — removed entirely |
+| P0-019 | P0 | Security | Dev fallback elevates privileges when Supabase is unreachable | **REMEDIATED** — fail-closed |
+| P0-020 | P0 | Data Integrity | Fabricated threat datasets presented as live intelligence | **REMEDIATED** — deleted, empty states added |
+| P0-021 | P0 | Security | Frontend API-key management (input, regenerate, rate slider) | **REMEDIATED** — whole card removed |
+| P1-022 | P1 | Data Integrity | APK scanner fabricates permissions and abuse flags | **REMEDIATED** — honest heuristic + disclaimer |
+| P1-023 | P1 | Data Integrity | Screenshot analyzer derives results from a filename hash | **REMEDIATED** — real AI vision call |
+| P1-024 | P1 | Data Integrity | Breach checker fabricates exposure matches | **REMEDIATED** — "belum aktif" state |
+| P1-025 | P1 | Data Integrity | `simulatePipeline()` fakes processing for a fixed duration | **REMEDIATED** — deleted |
+| P1-026 | P1 | Billing | Staged checkout grants a plan when the gateway is absent | **REMEDIATED** — hard-blocked, 503 |
+| P1-027 | P1 | Security | `Reset DIL State` destroys user data from a settings click | **REMEDIATED** — control removed |
+| P2-028 | P2 | Config | Supabase config hardcoded in HTML with no fail-closed validation | **REMEDIATED** — `config.js` + validation |
+| P2-029 | P2 | Ops | No readiness probe — Railway routes to half-configured instances | **REMEDIATED** — `/ready` returns 503 |
+| P2-030 | P2 | Ops | CORS accepted wildcard origins in production | **REMEDIATED** — explicit allowlist only |
 
 ---
 
@@ -414,33 +449,59 @@ The sidebar shows "Rian Aditya" with avatar "RA" and "Pro Plan · Jakarta" as a 
 
 ---
 
-## Feature Classification
+## Feature Classification (post-hardening)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Landing page navigation | Production-functional | Mobile menu, smooth scroll, anchor links work |
-| Dark/light theme | Production-functional | CSS variables, localStorage persistence |
-| Dashboard | Functional with limitations | Charts render, data is illustrative |
-| AI Scam Analyzer | Demo-only (without backend) | Falls back to local heuristic `Engine.analyzeText()` |
-| Link Scanner | Production-functional | Local heuristic analysis, no external API needed |
-| SMS Scanner | Production-functional | Local heuristic analysis |
-| Screenshot Analyzer | Blocked by backend | Requires AI vision API (not configured) |
-| APK Scanner | Production-functional | Filename-based heuristic analysis |
-| QR Scanner | Production-functional | Uses jsQR library for real QR decoding |
-| Server Security Audit | Blocked by backend | Requires AI API (not configured) |
-| Investment Checker | Blocked by backend | Requires AI API (not configured) |
-| Verification Center | Production-functional | Local trust scoring heuristic |
-| Deepfake Center | Blocked by backend | Requires AI vision API (not configured) |
-| Voice Fraud Intelligence | Blocked by backend | Requires AI API (not configured) |
-| Scam Database | Functional with limitations | Searchable hardcoded data |
-| Threat Feed | Demo-only | Hardcoded mock data |
-| Threat Map | Demo-only | Hardcoded city data |
-| Community Reporting | Demo-only | No persistence, localStorage only |
-| Simulation Center | Production-functional | Interactive scenarios work locally |
+| Landing page | Production-functional | Hero, features, pricing, FAQ; no fabricated statistics |
+| Dark/light theme | Production-functional | CSS variables |
+| Auth (email/password, OAuth, magic link) | Production-functional once Supabase is configured | No guest path; fails closed when unconfigured |
+| Dashboard | Production-functional | Real per-user data; unassessed score renders "Belum dinilai" |
+| AI Scam Analyzer | Production-functional once backend is configured | Bearer-authenticated call to `/api/ai/analyze` |
+| Link Scanner | Production-functional | Local heuristic, no external dependency |
+| SMS Scanner | Production-functional | Local heuristic |
+| Screenshot Analyzer | Production-functional once backend is configured | Real AI vision on the uploaded image |
+| APK Scanner | Functional with disclosed limitation | Filename/size heuristic only — `nameBasedOnly: true`, disclaimer shown |
+| QR Scanner | Production-functional | jsQR decoding, real |
+| Server Security Audit | Requires backend AI | Explicit 503/unavailable state when unset |
+| Investment Checker | Requires backend AI | Explicit unavailable state |
+| Verification Center | Production-functional | Local trust-scoring heuristic |
+| Deepfake Center | Requires backend AI vision | Explicit unavailable state |
+| Voice Fraud Intelligence | Requires backend AI | Explicit unavailable state |
+| Scam Database | Empty until populated | Honest empty state; no fabricated rows |
+| Threat Feed | Empty until populated | Honest empty state |
+| Threat Map | Empty until populated | Honest empty state |
+| Community Reporting | Requires Supabase + moderation | Honest empty state |
+| Simulation Center | Production-functional | Interactive scenarios, clearly labelled as simulation |
 | Recovery Center | Production-functional | Static checklist content |
-| Security Copilot | Demo-only | Pattern-matched responses, no real AI |
-| Settings | Production-functional | Theme, motion, API key removed |
-| Billing | Blocked by payment gateway | Staged demo only |
-| Subscription | Blocked by payment gateway | Plan display works, checkout is staged |
-| Auth | Blocked by Supabase config | Placeholder URLs, falls back to guest mode |
-| PWA | Blocked by missing files | manifest.json and sw.js now provided |
+| Security Copilot | Requires backend AI | No pattern-matched fake answers |
+| Settings | Production-functional | Profile, session, preferences, export, app info. No API-key panel |
+| Billing | Requires payment gateway | `/api/billing/checkout` returns 503 until configured |
+| Data export | Production-functional | Real JSON Blob download |
+| PWA | Production-functional | `manifest.json` + `sw.js` present, no API caching |
+
+---
+
+## Final Classification
+
+**READY AFTER CONFIGURATION**
+
+Every code-level blocker identified in both audit passes has been remediated and verified:
+
+- No demo or guest entry point exists anywhere in the shipped bundle.
+- No fabricated data is presented to users; every stripped surface renders an explicit empty state.
+- No credential management UI or credential storage exists on the client.
+- Every privileged backend route rejects anonymous access with 401 (verified live).
+- `/ready` refuses to report ready until Supabase and Anthropic are both configured (verified live).
+- CORS rejects unknown origins (verified live).
+- Runtime renders with 0 errors and 0 unhandled rejections.
+- All three CI gates pass; no secret patterns exist in `public/`.
+
+Deployment still requires operator action, which is why the classification is not "READY FOR DEPLOYMENT":
+
+1. Provision Supabase, run `backend/supabase_schema.sql`, confirm RLS is enabled on every table.
+2. Fill `public/config.js` with the real `API_BASE`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `PRODUCTION: true`.
+3. Set all Railway variables, with `FRONTEND_ORIGIN` as an exact origin (no wildcard).
+4. Sync the CSP `connect-src` in `public/_headers` with the real `API_BASE`.
+
+None of these are code changes; all are configuration. See `docs/DEPLOYMENT_GUIDE.md` and `docs/ENVIRONMENT_VARIABLES.md`.

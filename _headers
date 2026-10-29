@@ -1,5 +1,9 @@
 # Cloudflare Pages _headers file
 # Security headers for all routes
+#
+# IMPORTANT: replace https://trusion-api.up.railway.app in connect-src with
+# your actual Railway backend origin, and keep it in sync with
+# window.TRUSION_CONFIG.API_BASE in config.js.
 
 /*
   X-Content-Type-Options: nosniff
@@ -13,6 +17,9 @@
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 
-# No-cache for HTML (always get latest)
+# No-cache for HTML and runtime config (always get latest)
 /*.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/config.js
   Cache-Control: public, max-age=0, must-revalidate

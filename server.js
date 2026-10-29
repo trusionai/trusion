@@ -41,10 +41,21 @@ const anthropic = ANTHROPIC_API_KEY
   : null;
 
 // ─── Middleware ──────────────────────────────────────────────
+// In production, a wildcard origin is NOT acceptable: it would let any site
+// call the authenticated API with a user's cookies. Require an explicit
+// allowlist via FRONTEND_ORIGIN (comma-separated).
+const ALLOWED_ORIGINS = FRONTEND_ORIGIN === '*'
+  ? []
+  : FRONTEND_ORIGIN.split(',').map(s => s.trim()).filter(Boolean);
+
 const corsOptions = {
-  origin: NODE_ENV === 'production'
-    ? (FRONTEND_ORIGIN === '*' ? true : FRONTEND_ORIGIN.split(',').map(s => s.trim()))
-    : true,
+  origin(origin, callback){
+    // Same-origin / server-to-server requests have no Origin header.
+    if(!origin) return callback(null, true);
+    if(NODE_ENV !== 'production') return callback(null, true);
+    if(ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS: origin not allowed'));
+  },
   credentials: true,
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
@@ -104,6 +115,14 @@ async function requireAuth(req, res, next) {
 }
 
 // ─── Rate Limiting ───────────────────────────────────────────
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please slow down.' },
+});
+
 const aiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: (req) => {
@@ -229,6 +248,17 @@ app.get('/health', (req, res) => {
   });
 });
 
+// ─── Readiness Endpoint ─────────────────────────────────────
+// Returns 503 when a dependency required to serve traffic is missing.
+app.get('/ready', (req, res) => {
+  const ready = !!supabaseAdmin && !!anthropic;
+  res.status(ready ? 200 : 503).json({
+    ready,
+    dependencies: { supabase: !!supabaseAdmin, anthropic: !!anthropic },
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ─── AI Analyze (text) ──────────────────────────────────────
 app.post('/api/ai/analyze', requireAuth, aiLimiter, async (req, res) => {
   const validationError = validateTextRequest(req.body);
@@ -326,7 +356,7 @@ app.post('/api/ai/analyze-image', requireAuth, aiLimiter, async (req, res) => {
 });
 
 // ─── Auth: Get Server-Confirmed Role ────────────────────────
-app.get('/api/auth/role', requireAuth, async (req, res) => {
+app.get('/api/auth/role', generalLimiter, requireAuth, async (req, res) => {
   const role = await getUserRoleServer(req.user.id);
   const plan = await getUserPlan(req.user.id);
   res.json({ role, plan, userId: req.user.id });
@@ -448,11 +478,21 @@ process.on('SIGINT', () => {
 
 // ─── Start ──────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
+  const warnings = [];
+  if (NODE_ENV === 'production') {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) warnings.push('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing — auth disabled');
+    if (!ANTHROPIC_API_KEY) warnings.push('ANTHROPIC_API_KEY missing — AI endpoints will return 503');
+    if (ALLOWED_ORIGINS.length === 0) warnings.push('FRONTEND_ORIGIN not set to an explicit origin — all cross-origin requests will be rejected');
+  }
+  if (warnings.length) {
+    console.warn(JSON.stringify({ type: 'CONFIG_WARNINGS', warnings }));
+  }
   console.log(JSON.stringify({
     type: 'SERVER_START',
     port: PORT,
     env: NODE_ENV,
     timestamp: new Date().toISOString(),
+    allowedOrigins: ALLOWED_ORIGINS,
     services: {
       supabase: !!supabaseAdmin,
       anthropic: !!anthropic,

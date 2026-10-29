@@ -4,202 +4,195 @@
 
 ```
 ┌─────────────────────┐      ┌──────────────────┐      ┌─────────────────┐
-│  Cloudflare Pages   │─────▶│  Railway Backend  │─────▶│  Anthropic API  │
-│  (Frontend / PWA)    │      │  (Express.js)     │      │  (Claude AI)    │
-│  public/             │      │  backend/          │      │                 │
-└─────────────────────┘      └────────┬──────────┘      └─────────────────┘
-                                      │
-                                      ▼
-                             ┌──────────────────┐
-                             │  Supabase         │
-                             │  (Auth + Postgres)│
-                             └──────────────────┘
+│  Cloudflare Pages   │─────▶│  Railway Backend │─────▶│  Anthropic API  │
+│  (Frontend / PWA)   │      │  (Express.js)    │      │  (Claude AI)    │
+│  public/            │      │  backend/        │      │                 │
+└──────────┬──────────┘      └────────┬─────────┘      └─────────────────┘
+           │                          │
+           │ direct auth/RLS          ▼
+           ▼                 ┌──────────────────┐
+    ┌──────────────┐         │  Supabase        │
+    │  Supabase    │◀────────│  (Auth + Postgres│
+    │  Auth (JWT)  │         │   + RLS)         │
+    └──────────────┘         └──────────────────┘
 ```
 
-- **Frontend:** Static files in `public/` deployed to Cloudflare Pages via GitHub integration.
-- **Backend:** Express.js server in `backend/` deployed to Railway via GitHub integration.
-- **Auth/DB:** Supabase manages authentication and PostgreSQL database.
-- **AI:** Anthropic API key stored as a Railway environment variable — never exposed to the browser.
+- **Frontend:** static files in `public/` → Cloudflare Pages (GitHub integration).
+- **Backend:** Express.js in `backend/` → Railway (GitHub integration).
+- **Auth/DB:** Supabase handles identity, JWT issuance, and Postgres with RLS.
+- **AI:** Anthropic is called **only** from Railway. The key never reaches a browser.
+
+Two independent trust boundaries: the browser talks to Supabase directly for auth (anon key + RLS), and to Railway with a Bearer JWT for privileged work.
 
 ---
 
-## Step 1: GitHub Repository Setup
+## Step 1: GitHub Repository
 
-1. Create a new GitHub repository (e.g., `trusion-ai`).
-2. Push the contents of this project to the repository:
-   ```bash
-   git init
-   git add .
-   git commit -m "TRUSION AI — production readiness remediation"
-   git branch -M main
-   git remote add origin https://github.com/YOUR_ORG/trusion-ai.git
-   git push -u origin main
-   ```
+```bash
+git init
+git add .
+git commit -m "TRUSION AI — production hardening"
+git branch -M main
+git remote add origin https://github.com/YOUR_ORG/trusion-ai.git
+git push -u origin main
+```
+
+CI runs automatically: syntax checks, reference resolution, the demo-mode gate, the API-key-UI gate, and the storage-secret gate. **A failing gate blocks merge — do not bypass it.**
 
 ---
 
-## Step 2: Supabase Configuration
+## Step 2: Supabase
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. Go to **Settings → API** and note:
+2. **Settings → API** — copy:
    - `Project URL` → `SUPABASE_URL`
-   - `anon public` key → `SUPABASE_ANON_KEY`
-   - `service_role` key → `SUPABASE_SERVICE_ROLE_KEY` (server-side only!)
-3. Go to **Authentication → Providers** and enable:
-   - Email/Password
-   - Google OAuth (add your Google Cloud OAuth client ID/secret)
-   - Facebook OAuth (add your Meta app credentials)
-4. Create the `user_roles` table:
-   ```sql
-   CREATE TABLE user_roles (
-     user_id UUID REFERENCES auth.users(id) PRIMARY KEY,
-     role TEXT DEFAULT 'free' CHECK (role IN ('free','basic','pro','business','admin','superadmin')),
-     plan TEXT DEFAULT 'free' CHECK (plan IN ('free','basic','pro','business')),
-     billing_status TEXT DEFAULT 'inactive',
-     renewed_at TIMESTAMPTZ,
-     created_at TIMESTAMPTZ DEFAULT NOW()
-   );
+   - `anon public` → `SUPABASE_ANON_KEY` (public, RLS-protected)
+   - `service_role` → `SUPABASE_SERVICE_ROLE_KEY` (**server-side only**)
+3. **Authentication → Providers** — enable Email/Password, Google, Facebook as needed. Add the Pages domain to **URL Configuration → Redirect URLs**.
+4. **Run the schema.** The complete, authoritative DDL is in `backend/supabase_schema.sql` (tables `user_roles`, `scan_logs`, `payment_logs`, `community_reports`, `profiles`, plus RLS policies and the signup trigger). Run it in the SQL editor:
 
-   ALTER TABLE user_roles ENABLE ROW LEVEL SECURITY;
-   CREATE POLICY "Users can read own role" ON user_roles FOR SELECT USING (auth.uid() = user_id);
+   ```bash
+   # or via psql
+   psql "$DATABASE_URL" -f backend/supabase_schema.sql
    ```
 
-5. Create the `scan_logs` table:
-   ```sql
-   CREATE TABLE scan_logs (
-     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-     user_id UUID REFERENCES auth.users(id),
-     scan_type TEXT,
-     risk_score INTEGER,
-     risk_level TEXT,
-     correlation_id TEXT,
-     created_at TIMESTAMPTZ DEFAULT NOW()
-   );
+5. **Verify RLS is on** for every table:
 
-   ALTER TABLE scan_logs ENABLE ROW LEVEL SECURITY;
-   CREATE POLICY "Users can read own scans" ON scan_logs FOR SELECT USING (auth.uid() = user_id);
+   ```sql
+   SELECT tablename, rowsecurity FROM pg_tables WHERE schemaname = 'public';
    ```
 
-6. Create the `payment_logs` table:
-   ```sql
-   CREATE TABLE payment_logs (
-     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-     user_id UUID REFERENCES auth.users(id),
-     gateway_event_id TEXT UNIQUE,
-     plan_id TEXT,
-     amount INTEGER,
-     currency TEXT DEFAULT 'IDR',
-     status TEXT,
-     gateway TEXT,
-     raw_event JSONB,
-     created_at TIMESTAMPTZ DEFAULT NOW()
-   );
-   ```
-
-7. Update the frontend `SUPABASE_CONFIG` in `public/index.html` with your project URL and anon key.
+   Every row must show `rowsecurity = true`. If any is `false`, stop — user data is exposed.
 
 ---
 
-## Step 3: Railway Backend Deployment
+## Step 3: Railway Backend
 
-1. Go to [railway.app](https://railway.app) and create a new project.
-2. Choose **Deploy from GitHub repo** and select your `trusion-ai` repository.
-3. Set the **root directory** to `backend/`.
-4. Railway will detect the `Dockerfile` and `railway.json` automatically.
-5. Go to **Variables** and set:
-   - `NODE_ENV` = `production`
-   - `PORT` = `3000` (Railway provides this automatically)
-   - `FRONTEND_ORIGIN` = your Cloudflare Pages URL (e.g., `https://trusion.pages.dev`)
-   - `SUPABASE_URL` = your Supabase project URL
-   - `SUPABASE_SERVICE_ROLE_KEY` = your Supabase service role key
-   - `ANTHROPIC_API_KEY` = your Anthropic API key
-6. Railway will assign a domain like `https://trusion-backend.up.railway.app`.
-7. Verify the health check: visit `https://trusion-backend.up.railway.app/health` — should return `{ "status": "ok", ... }`.
+1. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo**.
+2. **Root directory:** `backend/`. Railway picks up `Dockerfile` and `railway.json`.
+3. **Variables:**
 
----
+   | Variable | Value |
+   |----------|-------|
+   | `NODE_ENV` | `production` |
+   | `PORT` | *(Railway injects — do not set)* |
+   | `FRONTEND_ORIGIN` | `https://your-project.pages.dev` — exact origin, comma-separate multiples, **no wildcard** |
+   | `SUPABASE_URL` | your project URL |
+   | `SUPABASE_SERVICE_ROLE_KEY` | service role key |
+   | `ANTHROPIC_API_KEY` | your Anthropic key |
 
-## Step 4: Cloudflare Pages Deployment
+4. Deploy. Railway assigns a domain such as `https://trusion-api.up.railway.app`.
+5. **Verify both probes:**
 
-1. Go to [Cloudflare Dashboard → Pages](https://dash.cloudflare.com/?to=/:account/pages).
-2. Click **Create a project** → **Connect to Git**.
-3. Select your `trusion-ai` GitHub repository.
-4. Set:
-   - **Production branch:** `main`
-   - **Build command:** (leave empty — no build step needed)
-   - **Build output directory:** `public`
-   - **Root directory:** `/` (project root)
-5. Go to **Settings → Environment variables** and set:
-   - `TRUSION_API_BASE` = your Railway backend URL (e.g., `https://trusion-backend.up.railway.app`)
-   - (Optional) `TRUSION_PRODUCTION` = `true`
-6. Deploy.
-7. Your site will be available at `https://trusion.pages.dev` (or your custom domain).
+   ```bash
+   curl -s https://trusion-api.up.railway.app/health   # expect 200, services both true
+   curl -s https://trusion-api.up.railway.app/ready    # expect 200, ready:true
+   ```
 
-### Custom Domain (Optional)
-
-1. In Cloudflare Pages → **Custom domains** → **Set up a custom domain**.
-2. Add your domain (e.g., `trusion.ai`).
-3. Update the `FRONTEND_ORIGIN` variable in Railway to match.
-4. Update the CSP in `public/_headers` to include your domain in `connect-src`.
+   If `/ready` returns **503**, read the Railway log for a `CONFIG_WARNINGS` line — it names the missing variable. Do not point the frontend at the backend until `/ready` returns 200.
 
 ---
 
-## Step 5: Configure Frontend API URL
+## Step 4: Cloudflare Pages
 
-In `public/index.html`, find the `API_BASE_URL` configuration (near the top of the script section) and either:
+1. **Dashboard → Pages → Create a project → Connect to Git.**
+2. Settings:
 
-- Set it via a `window.TRUSION_API_BASE` global before the script loads, OR
-- Update the fallback string to point to your Railway backend URL.
+   | Field | Value |
+   |-------|-------|
+   | Production branch | `main` |
+   | Build command | *(empty — static)* |
+   | Build output directory | `public` |
+   | Root directory | `/` |
 
-For Cloudflare Pages, you can use a `_redirects` rule or an environment-based approach. The simplest method:
+3. Deploy. The site appears at `https://your-project.pages.dev`.
 
-```html
-<script>window.TRUSION_API_BASE = 'https://trusion-backend.up.railway.app';</script>
+---
+
+## Step 5: Wire the Frontend to the Backend
+
+The frontend reads **only** `public/config.js`. There is no in-HTML `SUPABASE_CONFIG` and no `window.TRUSION_API_BASE` any more.
+
+Edit `public/config.js`:
+
+```js
+window.TRUSION_CONFIG = {
+  API_BASE: 'https://trusion-api.up.railway.app',
+  SUPABASE_URL: 'https://abcdefghijkl.supabase.co',
+  SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9....',
+  PRODUCTION: true
+};
 ```
 
-Add this line before the main application `<script>` tag in `index.html`.
+Commit and redeploy. `config.js` is served with `Cache-Control: no-store`, so changes take effect on the next load without a cache purge.
+
+### 5a. Sync the CSP — mandatory
+
+`public/_headers` restricts `connect-src`. If `API_BASE` points at an origin not listed there, the browser blocks every API call and the console fills with CSP violations.
+
+```diff
+- connect-src 'self' https://*.supabase.co https://trusion-api.up.railway.app;
++ connect-src 'self' https://*.supabase.co https://your-actual-api.up.railway.app;
+```
+
+Change both in the same commit.
+
+### 5b. Fail-safe behaviour to expect
+
+If `SUPABASE_URL` is empty, malformed, or still contains `YOUR_`, `isSupabaseConfigured()` returns `false` and the app shows:
+
+> *"Authentication service belum dikonfigurasi. Hubungi administrator."*
+
+This is intentional. There is **no guest or demo fallback** — a misconfigured deploy locks out rather than silently granting anonymous access.
 
 ---
 
-## Step 6: Verify Deployment
+## Step 6: Verify the Deployment
 
-1. Visit the Cloudflare Pages URL — the landing page should load.
-2. Click **Launch App** — if Supabase is configured, the auth gate appears.
-3. Sign in — you should be redirected to the dashboard.
-4. Try the Scam Analyzer — the request should go to your Railway backend, not directly to Anthropic.
-5. Check Railway logs — you should see structured JSON request logs.
-6. Run `/health` on the backend — should return `status: ok`.
+| # | Check | Expected |
+|---|-------|----------|
+| 1 | Landing page loads at the Pages URL | Renders; no console errors |
+| 2 | Click **Launch App** | Auth modal appears (not a dashboard) |
+| 3 | Sign in with email | Redirect to dashboard |
+| 4 | Dashboard security score | "Belum dinilai" — **not** a fabricated number |
+| 5 | Active Threats / Scam Alerts | Honest empty states |
+| 6 | Run a Scam Analyzer scan | Network tab shows a call to the Railway origin with an `Authorization: Bearer` header — never to `api.anthropic.com` |
+| 7 | Open Settings | No API-key field, no Rate Limit slider, no Reset DIL State |
+| 8 | Settings → export data | JSON file downloads |
+| 9 | Attempt upgrade | "Pembayaran belum dikonfigurasi" if no gateway is set |
+| 10 | Railway logs | Structured JSON with `correlationId` per request |
+| 11 | Logout | Returns to landing; back button does not restore the dashboard |
+| 12 | Anonymous hit on a protected API route | 401 |
 
 ---
 
-## Rollback Procedure
+## Rollback
 
 ### Cloudflare Pages
-1. Go to Cloudflare Pages → your project → **Deployments**.
-2. Find the last known good deployment.
-3. Click **⋯** → **Rollback to this deployment**.
-4. The rollback is instantaneous — no rebuild needed.
+Deployments → select last good → **⋯ → Rollback**. Instant, no rebuild.
 
 ### Railway
-1. Go to Railway → your service → **Deployments**.
-2. Find the last successful deployment.
-3. Click **Rollback**.
-4. Railway will redeploy the previous commit.
+Deployments → select last good → **Rollback**. Redeploys the prior commit.
 
 ### Database
-1. Supabase automatically creates daily backups.
-2. To restore: Supabase Dashboard → **Database → Backups**.
-3. Select the backup point and click **Restore**.
-4. **Warning:** Database restore is destructive — all data after the restore point is lost.
+Supabase → **Database → Backups** → Restore.
+
+> **Warning:** a database restore is destructive — everything after the restore point is lost. Take a manual backup before any schema migration.
 
 ---
 
-## Production Branch & Commands
+## Reference
 
 | Item | Value |
 |------|-------|
 | Production branch | `main` |
-| Frontend build command | (none — static files) |
+| Frontend build command | *(none — static)* |
 | Frontend output directory | `public/` |
 | Backend start command | `node server.js` |
-| Backend health check path | `/health` |
 | Backend root directory | `backend/` |
+| Liveness probe | `GET /health` → 200 |
+| Readiness probe | `GET /ready` → 200 only when Supabase **and** Anthropic are configured |
+| Runtime config | `public/config.js` |
+| CSP / headers | `public/_headers` |
+| Icon assets | `public/assets/trusion-mark-{64,192,512}.png` — regenerate with `node scripts/gen-icons.js` |
+| Pre-deploy check | `node scripts/verify-frontend.js` (also runs in CI) |

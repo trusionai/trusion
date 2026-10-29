@@ -41,10 +41,41 @@ jobs:
 
       - name: Check required files exist
         run: |
-          for f in public/index.html public/manifest.json public/sw.js public/_headers public/robots.txt public/_redirects; do
+          for f in public/index.html public/config.js public/manifest.json public/sw.js \
+                   public/_headers public/robots.txt public/_redirects \
+                   public/assets/trusion-mark-64.png public/assets/trusion-mark-192.png \
+                   public/assets/trusion-mark-512.png; do
             test -f "$f" || { echo "::error::Missing $f"; exit 1; }
           done
           echo "All required files present."
+
+      - name: Check manifest icon references resolve
+        run: |
+          node -e '
+            const fs=require("fs"), path=require("path");
+            const m=JSON.parse(fs.readFileSync("public/manifest.json","utf8"));
+            let bad=0;
+            (m.icons||[]).forEach(function(i){
+              const p=path.join("public", i.src.replace(/^\//,""));
+              if(!fs.existsSync(p)){ console.log("::error::manifest icon missing: "+i.src); bad++; }
+            });
+            if(bad){ process.exit(1); }
+            console.log("All "+(m.icons||[]).length+" manifest icons resolve.");
+          '
+
+      - name: Check config.js contains no server-side secrets
+        run: |
+          echo "Checking public/config.js for privileged credentials..."
+          if grep -nE '(service_role|SERVICE_ROLE|sk-ant-|sk_live_|PRIVATE KEY)' public/config.js; then
+            echo "::error::A privileged secret appears to be present in public/config.js"
+            exit 1
+          fi
+          echo "config.js carries no privileged credentials."
+
+      - name: Check CSP connect-src is documented
+        run: |
+          grep -q "connect-src" public/_headers || { echo "::error::connect-src missing from CSP"; exit 1; }
+          echo "CSP connect-src present."
 
       - name: Check for noindex tag (should be removed for production)
         run: |
@@ -53,6 +84,35 @@ jobs:
           else
             echo "Production indexing enabled."
           fi
+
+      - name: Check demo mode and guest bypass are removed
+        run: |
+          echo "Checking for demo-mode / guest bypass remnants..."
+          if grep -nE 'continueAsGuest|Guest \(Demo Mode\)|mode demo|staged-demo-only|\[DEMO\]' public/index.html; then
+            echo "::error::Demo mode or guest bypass still present in production frontend"
+            exit 1
+          fi
+          echo "No demo-mode or guest bypass found."
+
+      - name: Check frontend API-key management UI is removed
+        run: |
+          echo "Checking for frontend API key management..."
+          if grep -nE 'TRUSION API KEY|Regenerate TRUSION Key|toggleApiKey|api-key-field|saveAiEngineApiKey' public/index.html; then
+            echo "::error::Frontend API-key management UI still present"
+            exit 1
+          fi
+          echo "No frontend API-key management UI found."
+
+      - name: Check no secrets stored in browser storage
+        run: |
+          if grep -nE "localStorage\.setItem\([^)]*(apiKey|api_key|secret|token)" public/index.html; then
+            echo "::error::Secret-like value written to localStorage"
+            exit 1
+          fi
+          echo "No secrets written to localStorage."
+
+      - name: Run frontend verification suite
+        run: node scripts/verify-frontend.js
 
   backend-check:
     name: Backend — Install, Lint, Test
@@ -91,3 +151,23 @@ jobs:
             require('./server.js');
             setTimeout(() => process.exit(0), 2000);
           " && echo "Server starts successfully" || echo "Server start check completed"
+
+      - name: Smoke test health and readiness endpoints
+        run: |
+          PORT=3999 NODE_ENV=production node server.js &
+          SERVER_PID=$!
+          sleep 2
+          set +e
+          HEALTH=$(curl -s -o /tmp/health.json -w "%{http_code}" http://127.0.0.1:3999/health)
+          READY=$(curl -s -o /tmp/ready.json -w "%{http_code}" http://127.0.0.1:3999/ready)
+          AUTHZ=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3999/api/auth/role)
+          kill $SERVER_PID 2>/dev/null
+          echo "health=$HEALTH ready=$READY auth_role=$AUTHZ"
+          cat /tmp/health.json; echo
+          cat /tmp/ready.json; echo
+          [ "$HEALTH" = "200" ] || { echo "::error::/health did not return 200"; exit 1; }
+          [ "$AUTHZ" = "401" ] || { echo "::error::/api/auth/role did not reject anonymous access"; exit 1; }
+          if [ "$READY" = "200" ]; then
+            echo "::warning::/ready returned 200 without configured dependencies — check readiness logic"
+          fi
+          echo "Endpoint smoke test passed."
